@@ -1,8 +1,0 @@
-pandas
-numpy
-scikit-learn
-matplotlib
-requests
-tensorflow
-torch
-optuna
