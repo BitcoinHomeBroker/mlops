@@ -41,24 +41,6 @@ MODEL_DIR = "outputs/model"
 MODEL_PATH = os.path.join(MODEL_DIR, "bitcoinhomebroker.pth")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# Cria o modelo com os mesmos parâmetros usados no treino anterior
-model = LSTM_PT(
-    n_features=X_tr_seq.shape[-1],
-    hidden=192,
-    layers_n=2,
-    dropout=0.2,
-    bidir=False
-)
-
-# Carrega pesos se o modelo anterior existir
-if os.path.exists(MODEL_PATH):
-    print(f"Carregando modelo existente de {MODEL_PATH}")
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device("cpu")))
-else:
-    print("Nenhum modelo anterior encontrado. Iniciando treinamento do zero.")
-
-
-
 # Try Optuna import
 try:
     import optuna
@@ -537,24 +519,39 @@ class LSTM_PT(nn.Module):
         out = out[:, -1, :]
         return self.fc(out).squeeze(-1)
 
-def train_eval_pt(params, X_train, y_train, X_val, y_val):
+def train_eval_pt(params, X_train, y_train, X_val, y_val, init_state_path=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    batch = params["batch"]
-    hidden = params["hidden"]
-    layers = params["layers"]
+    batch   = params["batch"]
+    hidden  = params["hidden"]
+    layers  = params["layers"]
     dropout = params["dropout"]
-    lr = params["lr"]
-    epochs = params["epochs"]
-    bidir = params["bidir"]
+    lr      = params["lr"]
+    epochs  = params["epochs"]
+    bidir   = params["bidir"]
+
     train_ds = SeqDataset(X_train, y_train)
-    val_ds   = SeqDataset(X_val, y_val)
+    val_ds   = SeqDataset(X_val,   y_val)
     train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True)
-    val_loader   = DataLoader(val_ds, batch_size=batch, shuffle=False)
-    model = LSTM_PT(n_features=X_train.shape[-1], hidden=hidden, layers_n=layers, dropout=dropout, bidir=bidir).to(device)
+    val_loader   = DataLoader(val_ds,   batch_size=batch, shuffle=False)
+
+    model = LSTM_PT(
+        n_features=X_train.shape[-1],
+        hidden=hidden, layers_n=layers, dropout=dropout, bidir=bidir
+    ).to(device)
+
+    # Carrega pesos iniciais, se existir (continuação de treino)
+    if init_state_path and os.path.exists(init_state_path):
+        print(f"Carregando pesos iniciais de {init_state_path}")
+        state = torch.load(init_state_path, map_location=device)
+        model.load_state_dict(state)
+
     optim = torch.optim.Adam(model.parameters(), lr=lr)
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, mode='min', factor=0.5, patience=4, verbose=False)
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optim, mode='min', factor=0.5, patience=4, verbose=False
+    )
     loss_fn = nn.MSELoss()
     best_val = float("inf"); best_state=None; patience=10; no_improve=0
+
     for ep in range(epochs):
         model.train(); tr_loss=0.0
         for xb, yb in train_loader:
@@ -567,6 +564,7 @@ def train_eval_pt(params, X_train, y_train, X_val, y_val):
             optim.step()
             tr_loss += loss.item()*len(xb)
         tr_loss /= len(train_ds)
+
         model.eval(); va_loss=0.0
         with torch.no_grad():
             for xb, yb in val_loader:
@@ -576,12 +574,16 @@ def train_eval_pt(params, X_train, y_train, X_val, y_val):
                 va_loss += loss.item()*len(xb)
         va_loss /= len(val_ds)
         sched.step(va_loss)
+
         if va_loss < best_val - 1e-6:
-            best_val = va_loss; best_state = {k:v.cpu().clone() for k,v in model.state_dict().items()}; no_improve=0
+            best_val = va_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            no_improve = 0
         else:
             no_improve += 1
             if no_improve >= patience:
                 break
+
     if best_state is not None:
         model.load_state_dict(best_state)
     return model, best_val
@@ -611,7 +613,7 @@ if RUN_PT_TUNING:
         bp = study.best_params
         best_params_pt.update({"hidden":bp["hidden"],"layers":bp["layers"],"dropout":bp["dropout"],"lr":bp["lr"],"batch":bp["batch"],"epochs":bp["epochs"],"bidir":bp["bidir"]})
         print("Best PT params (Optuna):", best_params_pt)
-        final_model, _ = train_eval_pt(best_params_pt, X_tr_seq, y_tr_seq, X_te_seq, y_te_seq)
+        final_model, _ = train_eval_pt(best_params_pt, X_tr_seq, y_tr_seq, X_te_seq, y_te_seq, init_state_path=MODEL_PATH)
         final_model.eval()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         with torch.no_grad():
@@ -629,5 +631,5 @@ if RUN_PT_TUNING:
         ax.legend()
         plt.show()
         print("Salvando modelo...")
-        torch.save(model.state_dict(), MODEL_PATH)
+        torch.save(final_model.state_dict(), MODEL_PATH)
         print(f"Modelo salvo em: {MODEL_PATH}")
