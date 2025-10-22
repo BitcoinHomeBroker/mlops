@@ -605,5 +605,5 @@ if RUN_PT_TUNING:
         ax.legend()
         plt.show()
         print("Salvando modelo...")
-        torch.save(final_model.state_dict(), "btc_usdc_lstm_model_pytorch.pth")
+        torch.save(final_model.state_dict(), "bitcoinhomebroker.pth")
         print("Modelo salvo.")
