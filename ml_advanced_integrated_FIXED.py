@@ -35,6 +35,30 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
+import os
+
+MODEL_DIR = "outputs/model"
+MODEL_PATH = os.path.join(MODEL_DIR, "bitcoinhomebroker.pth")
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+# Cria o modelo com os mesmos parâmetros usados no treino anterior
+model = LSTM_PT(
+    n_features=X_tr_seq.shape[-1],
+    hidden=192,
+    layers_n=2,
+    dropout=0.2,
+    bidir=False
+)
+
+# Carrega pesos se o modelo anterior existir
+if os.path.exists(MODEL_PATH):
+    print(f"Carregando modelo existente de {MODEL_PATH}")
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device("cpu")))
+else:
+    print("Nenhum modelo anterior encontrado. Iniciando treinamento do zero.")
+
+
+
 # Try Optuna import
 try:
     import optuna
@@ -605,5 +629,5 @@ if RUN_PT_TUNING:
         ax.legend()
         plt.show()
         print("Salvando modelo...")
-        torch.save(final_model.state_dict(), "bitcoinhomebroker.pth")
-        print("Modelo salvo.")
+        torch.save(model.state_dict(), MODEL_PATH)
+        print(f"Modelo salvo em: {MODEL_PATH}")
