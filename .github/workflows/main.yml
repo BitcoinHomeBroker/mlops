@@ -23,7 +23,7 @@ jobs:
       - name: Download previous model artifact (if any)
         uses: actions/download-artifact@v4
         with:
-          name: llm-model-BitcoinHomeBroker
+          name: bitcoinhomebroker.pth
           path: outputs/model
         continue-on-error: true
 
@@ -45,7 +45,7 @@ jobs:
       # Normaliza o nome do arquivo caso o script salve com outro nome
       - name: Normalize model filename
         run: |
-          if [ ! -f "outputs/model/bitcoinhomebroker.pth" ] && [ -f "btc_usdc_lstm_model_pytorch.pth" ]; then
+          if [ ! -f "outputs/model/bitcoinhomebroker.pth" ] && [ -f "bitcoinhomebroker.pth" ]; then
             mv btc_usdc_lstm_model_pytorch.pth outputs/model/bitcoinhomebroker.pth
           fi
           # Caso algum outro local/arquivo tenha sido usado, tente localizar e mover
