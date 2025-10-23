@@ -16,14 +16,13 @@ jobs:
         with:
           python-version: '3.9'
 
-      # (Opcional) Garante a pasta de modelos e baixa o último artifact, se existir
       - name: Prepare model dir
         run: mkdir -p outputs/model
 
       - name: Download previous model artifact (if any)
         uses: actions/download-artifact@v4
         with:
-          name: bitcoinhomebroker.pth
+          name: llm-model-BitcoinHomeBroker
           path: outputs/model
         continue-on-error: true
 
@@ -42,24 +41,27 @@ jobs:
       - name: Run training script
         run: python ml_advanced_integrated_FIXED.py
 
-      # Normaliza o nome do arquivo caso o script salve com outro nome
       - name: Normalize model filename
         run: |
-          if [ ! -f "outputs/model/bitcoinhomebroker.pth" ] && [ -f "bitcoinhomebroker.pth" ]; then
-            mv btc_usdc_lstm_model_pytorch.pth outputs/model/bitcoinhomebroker.pth
+          echo "Normalizando nome do modelo..."
+          mkdir -p outputs/model
+          
+          # Procura qualquer .pth criado pelo script
+          FOUND=$(find . -maxdepth 3 -type f -name "*.pth" | head -n 1 || true)
+          echo "Arquivo encontrado: $FOUND"
+
+          if [ -n "$FOUND" ]; then
+            BASENAME=$(basename "$FOUND")
+            echo "Nome base do modelo detectado: $BASENAME"
+            mv "$FOUND" "outputs/model/$BASENAME"
           fi
-          # Caso algum outro local/arquivo tenha sido usado, tente localizar e mover
-          if [ ! -f "outputs/model/bitcoinhomebroker.pth" ]; then
-            FOUND=$(find . -maxdepth 3 -type f -name "*.pth" | head -n 1 || true)
-            if [ -n "$FOUND" ]; then
-              mv "$FOUND" outputs/model/bitcoinhomebroker.pth
-            fi
-          fi
+
+          echo "Listando arquivos finais em outputs/model:"
           ls -lah outputs/model || true
 
       - name: Upload model artifact
         uses: actions/upload-artifact@v4
         with:
           name: llm-model-BitcoinHomeBroker
-          path: outputs/model/bitcoinhomebroker.pth
+          path: outputs/model/*.pth
           if-no-files-found: error
