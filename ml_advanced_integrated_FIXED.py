@@ -41,6 +41,56 @@ MODEL_DIR = "outputs/model"
 MODEL_PATH = os.path.join(MODEL_DIR, "bitcoinhomebroker.pth")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# === Checkpoint helpers ===
+def _extract_state_dict(chk):
+    # aceita tanto dict puro de state_dict quanto dict com metadados
+    if isinstance(chk, dict) and "state_dict" in chk:
+        return chk["state_dict"]
+    return chk
+
+def _extract_hparams(chk):
+    if isinstance(chk, dict) and "hparams" in chk:
+        return chk["hparams"]
+    return None
+
+def load_weights_if_compatible(model, path, device, expect_hparams=None, verbose=True):
+    if not path or not os.path.exists(path):
+        if verbose: print(f"[ckpt] Não existe checkpoint em: {path}")
+        return False
+    chk = torch.load(path, map_location=device)
+    ck_hparams = _extract_hparams(chk)
+    if expect_hparams is not None and ck_hparams is not None:
+        # Verificação rápida de compatibilidade estrutural
+        keys_to_check = ["hidden", "layers", "bidir"]
+        diff = {k: (ck_hparams.get(k), expect_hparams.get(k)) for k in keys_to_check
+                if ck_hparams.get(k) != expect_hparams.get(k)}
+        if diff:
+            if verbose: print(f"[ckpt] Hparams incompatíveis, pulando load: {diff}")
+            return False
+
+    sd = _extract_state_dict(chk)
+    model_sd = model.state_dict()
+    # Filtra apenas tensores com mesmas shapes
+    filtered = {k: v for k, v in sd.items() if k in model_sd and v.shape == model_sd[k].shape}
+    if not filtered:
+        if verbose: print("[ckpt] Nenhum tensor compatível encontrado; pulando load.")
+        return False
+    # Carrega de forma não estrita (o que faltar usa inicialização atual)
+    missing, unexpected = model.load_state_dict(filtered, strict=False)
+    if verbose:
+        print(f"[ckpt] Pesos carregados: {len(filtered)} | faltando: {len(missing)} | inesperados ignorados: {len(unexpected)}")
+    return True
+
+def save_checkpoint(model, path, hparams=None):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {"state_dict": model.state_dict()}
+    if hparams is not None:
+        payload["hparams"] = dict(hparams)  # grava os melhores params p/ compat-check futuro
+    torch.save(payload, path)
+    print(f"[ckpt] Modelo salvo em: {path}")
+
+
+
 # Try Optuna import
 try:
     import optuna
@@ -539,11 +589,12 @@ def train_eval_pt(params, X_train, y_train, X_val, y_val, init_state_path=None):
         hidden=hidden, layers_n=layers, dropout=dropout, bidir=bidir
     ).to(device)
 
-    # Carrega pesos iniciais, se existir (continuação de treino)
-    if init_state_path and os.path.exists(init_state_path):
+    #Carrega pesos iniciais apenas se compatíveis
+    if init_state_path:
         print(f"Carregando pesos iniciais de {init_state_path}")
-        state = torch.load(init_state_path, map_location=device)
-        model.load_state_dict(state)
+        _ = load_weights_if_compatible(
+            model, init_state_path, device, expect_hparams=params, verbose=True
+        )
 
     optim = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -587,6 +638,7 @@ def train_eval_pt(params, X_train, y_train, X_val, y_val, init_state_path=None):
     if best_state is not None:
         model.load_state_dict(best_state)
     return model, best_val
+
 
 if RUN_PT_TUNING:
     if not _HAS_OPTUNA:
