@@ -19,13 +19,9 @@ jobs:
           python-version: '3.9'
 
       - name: Prepare folders
-        run: |
-          mkdir -p outputs/model
+        run: mkdir -p outputs/model
 
-      # ==========
-      # DOWNLOAD do modelo anterior (para warm-start)
-      # Tenta primeiro o artifact "latest"; se não existir, tenta o legado.
-      # ==========
+      # === DOWNLOAD do modelo anterior ===
       - name: Download previous model artifact (latest)
         uses: actions/download-artifact@v4
         with:
@@ -41,44 +37,37 @@ jobs:
           path: outputs/model
         continue-on-error: true
 
-      - name: Normalize preexisting model before training
+      # === Normalização do modelo anterior ===
+      - name: Normalize preexisting model (warm-start & archive prev)
         shell: bash
         run: |
-          echo "Normalizando modelo pré-existente (se houver)..."
-          mkdir -p outputs/model
           set -e
+          echo "Normalizando modelo pré-existente..."
+          mkdir -p outputs/model
 
-          # Procura .pth já em outputs/model (vindos do download de artifact)
-          DL_LIST=$(ls -t outputs/model/*.pth 2>/dev/null || true)
-          if [ -z "$DL_LIST" ]; then
-            echo "Nenhum modelo pré-existente encontrado (primeiro treino ou artifact indisponível)."
+          # Seleciona o .pth mais recente baixado (se houver)
+          PREV_SRC=$(ls -t outputs/model/*.pth 2>/dev/null | head -n 1 || true)
+          if [ -z "$PREV_SRC" ]; then
+            echo "Nenhum modelo anterior encontrado."
           else
-            echo "Modelos baixados:"
-            echo "$DL_LIST"
-            PREV=$(echo "$DL_LIST" | head -n 1)
-            echo "Selecionado para warm-start: $PREV"
+            echo "Modelo anterior encontrado: $PREV_SRC"
+            # Mantém uma cópia imutável como 'prev'
+            cp -f "$PREV_SRC" outputs/model/bitcoinhomebroker_prev.pth
 
-            SRC=$(realpath "$PREV")
-            DEST_LATEST=$(realpath -m "outputs/model/bitcoinhomebroker_latest.pth")
-            DEST_COMPAT=$(realpath -m "outputs/model/bitcoinhomebroker.pth")
-
-            # Só copia se o destino for diferente da origem
-            if [ "$SRC" != "$DEST_LATEST" ]; then
-              cp -f "$SRC" "$DEST_LATEST"
-              echo "Atualizado: $DEST_LATEST"
-            else
-              echo "Já é o arquivo 'latest'; nada a copiar para $DEST_LATEST."
+            # Prepara o nome que o seu script espera carregar
+            # (compat + alias latest)
+            if [ "$(realpath "$PREV_SRC")" != "$(realpath -m outputs/model/bitcoinhomebroker.pth)" ]; then
+              cp -f "$PREV_SRC" outputs/model/bitcoinhomebroker.pth
+            fi
+            if [ "$(realpath "$PREV_SRC")" != "$(realpath -m outputs/model/bitcoinhomebroker_latest.pth)" ]; then
+              cp -f "$PREV_SRC" outputs/model/bitcoinhomebroker_latest.pth
             fi
 
-            if [ "$SRC" != "$DEST_COMPAT" ]; then
-              cp -f "$SRC" "$DEST_COMPAT"
-              echo "Atualizado: $DEST_COMPAT"
-            else
-              echo "Já é o arquivo compatível esperado; nada a copiar para $DEST_COMPAT."
-            fi
+            # Hash do arquivo usado para warm-start (para comparação pós-treino)
+            sha256sum outputs/model/bitcoinhomebroker.pth | tee outputs/model/.pre_hash.txt
           fi
 
-          echo "Conteúdo de outputs/model antes do treinamento:"
+          echo "Conteúdo atual:"
           ls -lah outputs/model || true
 
       - name: Install dependencies
@@ -86,51 +75,99 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Marcador de tempo para identificar arquivos gerados/alterados neste run
+      - name: Create training timestamp marker
+        run: date -u +"%Y-%m-%dT%H:%M:%SZ" | tee outputs/model/.train_start.txt
+
       - name: Run training script
         run: python ml_advanced_integrated_FIXED.py
 
-      # Move qualquer .pth gerado FORA de outputs/model para dentro,
-      # escolhe o mais novo e cria latest + arquivo com timestamp
-      - name: Normalize & version model files (post-training)
+      # === Coleta apenas modelos criados/alterados DEPOIS do marcador ===
+      - name: Collect updated models (post-training)
         shell: bash
         run: |
-          echo "Normalizando arquivos de modelo gerados..."
+          set -e
+          echo "Coletando modelos atualizados..."
+          MARKER_TIME=$(stat -c %Y outputs/model/.train_start.txt)
+          UPDATED=$(find outputs/model -type f -name "*.pth" -newer outputs/model/.train_start.txt | tr '\n' ' ' || true)
+
+          echo "Arquivos .pth atualizados após o treino:"
+          echo "${UPDATED:-<nenhum>}"
+
+          # Se o script salvou fora de outputs/model, mova-os para dentro
+          OUTSIDE=$(find . -maxdepth 3 -type f -name "*.pth" ! -path "./outputs/model/*" || true)
+          if [ -n "$OUTSIDE" ]; then
+            echo "Movendo .pth gerados fora de outputs/model para outputs/model:"
+            echo "$OUTSIDE"
+            for f in $OUTSIDE; do
+              mv -f "$f" outputs/model/
+            done
+          fi
+
+          # Recalcula UPDATED após possíveis moves
+          UPDATED=$(find outputs/model -type f -name "*.pth" -newer outputs/model/.train_start.txt | tr '\n' ' ' || true)
+
+          if [ -z "$UPDATED" ]; then
+            echo "ATENÇÃO: Nenhum .pth foi modificado/gerado após o treino."
+            # Ainda assim, seguimos e veremos se o hash mudou.
+          fi
+
+          echo "Listagem final em outputs/model:"
+          ls -lah outputs/model || true
+
+      # === Compara hash pré x pós e versiona ===
+      - name: Version & upload-ready (latest + timestamp)
+        shell: bash
+        run: |
+          set -e
+          echo "Versionando modelos..."
           mkdir -p outputs/model
 
-          # Move .pth de fora para dentro (evita 'same file')
-          FOUND_LIST=$(find . -maxdepth 3 -type f -name "*.pth" ! -path "./outputs/model/*" || true)
-          if [ -n "$FOUND_LIST" ]; then
-            echo "Arquivos .pth fora de outputs/model:"
-            echo "$FOUND_LIST"
-            for f in $FOUND_LIST; do
-              base=$(basename "$f")
-              dest="outputs/model/$base"
-              echo "Movendo $f -> $dest"
-              mv -f "$f" "$dest"
-            done
-          else
-            echo "Nenhum .pth fora de outputs/model; prosseguindo."
-          fi
-
-          # Escolhe o .pth mais novo em outputs/model
-          LATEST_SRC=$(ls -t outputs/model/*.pth 2>/dev/null | head -n 1 || true)
-          if [ -z "$LATEST_SRC" ]; then
-            echo "ERRO: Nenhum arquivo .pth encontrado após o treinamento."
+          # Define o candidato 'novo' como o .pth mais recente no diretório
+          CAND=$(ls -t outputs/model/*.pth 2>/dev/null | head -n 1 || true)
+          if [ -z "$CAND" ]; then
+            echo "ERRO: Nenhum arquivo .pth presente para versionamento."
             exit 1
           fi
-          echo "Mais recente: $LATEST_SRC"
+          echo "Candidato a modelo atualizado: $CAND"
 
-          # latest fixo
+          # Hash pré-treino (se existia)
+          PRE_HASH_FILE="outputs/model/.pre_hash.txt"
+          if [ -f "$PRE_HASH_FILE" ]; then
+            PRE_HASH=$(cut -d ' ' -f1 "$PRE_HASH_FILE")
+            echo "PRE_HASH: $PRE_HASH"
+          else
+            PRE_HASH=""
+            echo "Sem PRE_HASH (primeiro treino ou sem modelo anterior)."
+          fi
+
+          # Hash do candidato pós-treino
+          NEW_HASH=$(sha256sum "$CAND" | cut -d ' ' -f1)
+          echo "NEW_HASH: $NEW_HASH"
+
+          # Decide se houve atualização real
+          UPDATED="yes"
+          if [ -n "$PRE_HASH" ] && [ "$PRE_HASH" = "$NEW_HASH" ]; then
+            UPDATED="no"
+            echo "AVISO: Hash igual ao anterior — o arquivo não mudou."
+          fi
+
+          # Sempre publicar 'latest' e 'timestamp', mas registrar se não mudou
           LATEST_FIXED="outputs/model/bitcoinhomebroker_latest.pth"
-          cp -f "$LATEST_SRC" "$LATEST_FIXED"
+          cp -f "$CAND" "$LATEST_FIXED"
 
-          # histórico com timestamp
           TS=$(date +%Y%m%d_%H%M%S)
           ARCHIVE="outputs/model/bitcoinhomebroker_${TS}.pth"
-          cp -f "$LATEST_SRC" "$ARCHIVE"
+          cp -f "$CAND" "$ARCHIVE"
 
-          echo "Arquivos finais em outputs/model:"
-          ls -lah outputs/model
+          if [ "$UPDATED" = "no" ]; then
+            echo "Nenhuma diferença detectada entre o pré e o pós (pode indicar que o script não salvou novo estado ou convergiu sem atualizar)."
+          else
+            echo "Modelo atualizado detectado e versionado."
+          fi
+
+          echo "Arquivos finais:"
+          ls -lah outputs/model || true
 
       - name: Upload artifact (latest)
         uses: actions/upload-artifact@v4
