@@ -3,10 +3,12 @@ name: Train BitcoinHomeBroker LLM Model
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   train:
     runs-on: ubuntu-latest
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -16,21 +18,52 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Prepare model dir
-        run: mkdir -p outputs/model
+      - name: Prepare folders
+        run: |
+          mkdir -p outputs/model
 
-      - name: Download previous model artifact (if any)
+      # ==========
+      # DOWNLOAD do modelo anterior (para warm-start)
+      # Tenta primeiro o artifact "latest"; se não existir, tenta o legado.
+      # ==========
+      - name: Download previous model artifact (latest)
+        uses: actions/download-artifact@v4
+        with:
+          name: llm-model-BitcoinHomeBroker-latest
+          path: outputs/model
+        continue-on-error: true
+
+      - name: Download previous model artifact (legacy fallback)
+        if: ${{ failure() || cancelled() }}
         uses: actions/download-artifact@v4
         with:
           name: llm-model-BitcoinHomeBroker
           path: outputs/model
         continue-on-error: true
 
-      - name: List files before install (debug)
+      # Normaliza o arquivo baixado para os nomes esperados pelo script
+      - name: Normalize preexisting model before training
+        shell: bash
         run: |
-          pwd
-          ls -lah
-          ls -lah outputs || true
+          echo "Normalizando modelo pré-existente (se houver)..."
+          mkdir -p outputs/model
+          set -e
+
+          # Procura .pth já em outputs/model (vindos do download de artifact)
+          DL_LIST=$(ls -t outputs/model/*.pth 2>/dev/null || true)
+          if [ -z "$DL_LIST" ]; then
+            echo "Nenhum modelo pré-existente encontrado (primeiro treino ou artifact indisponível)."
+          else
+            echo "Modelos baixados:"
+            echo "$DL_LIST"
+            PREV=$(echo "$DL_LIST" | head -n 1)
+            echo "Selecionado para warm-start: $PREV"
+            # Garante compatibilidade com scripts antigos e o alias 'latest'
+            cp -f "$PREV" outputs/model/bitcoinhomebroker_latest.pth
+            cp -f "$PREV" outputs/model/bitcoinhomebroker.pth
+          fi
+
+          echo "Conteúdo de outputs/model antes do treinamento:"
           ls -lah outputs/model || true
 
       - name: Install dependencies
@@ -41,27 +74,61 @@ jobs:
       - name: Run training script
         run: python ml_advanced_integrated_FIXED.py
 
-      - name: Normalize model filename
+      # Move qualquer .pth gerado FORA de outputs/model para dentro,
+      # escolhe o mais novo e cria latest + arquivo com timestamp
+      - name: Normalize & version model files (post-training)
+        shell: bash
         run: |
-          echo "Normalizando nome do modelo..."
+          echo "Normalizando arquivos de modelo gerados..."
           mkdir -p outputs/model
-          
-          # Procura qualquer .pth criado pelo script
-          FOUND=$(find . -maxdepth 3 -type f -name "*.pth" | head -n 1 || true)
-          echo "Arquivo encontrado: $FOUND"
 
-          if [ -n "$FOUND" ]; then
-            BASENAME=$(basename "$FOUND")
-            echo "Nome base do modelo detectado: $BASENAME"
-            mv "$FOUND" "outputs/model/$BASENAME"
+          # Move .pth de fora para dentro (evita 'same file')
+          FOUND_LIST=$(find . -maxdepth 3 -type f -name "*.pth" ! -path "./outputs/model/*" || true)
+          if [ -n "$FOUND_LIST" ]; then
+            echo "Arquivos .pth fora de outputs/model:"
+            echo "$FOUND_LIST"
+            for f in $FOUND_LIST; do
+              base=$(basename "$f")
+              dest="outputs/model/$base"
+              echo "Movendo $f -> $dest"
+              mv -f "$f" "$dest"
+            done
+          else
+            echo "Nenhum .pth fora de outputs/model; prosseguindo."
           fi
 
-          echo "Listando arquivos finais em outputs/model:"
-          ls -lah outputs/model || true
+          # Escolhe o .pth mais novo em outputs/model
+          LATEST_SRC=$(ls -t outputs/model/*.pth 2>/dev/null | head -n 1 || true)
+          if [ -z "$LATEST_SRC" ]; then
+            echo "ERRO: Nenhum arquivo .pth encontrado após o treinamento."
+            exit 1
+          fi
+          echo "Mais recente: $LATEST_SRC"
 
-      - name: Upload model artifact
+          # latest fixo
+          LATEST_FIXED="outputs/model/bitcoinhomebroker_latest.pth"
+          cp -f "$LATEST_SRC" "$LATEST_FIXED"
+
+          # histórico com timestamp
+          TS=$(date +%Y%m%d_%H%M%S)
+          ARCHIVE="outputs/model/bitcoinhomebroker_${TS}.pth"
+          cp -f "$LATEST_SRC" "$ARCHIVE"
+
+          echo "Arquivos finais em outputs/model:"
+          ls -lah outputs/model
+
+      - name: Upload artifact (latest)
         uses: actions/upload-artifact@v4
         with:
-          name: llm-model-BitcoinHomeBroker
-          path: outputs/model/*.pth
+          name: llm-model-BitcoinHomeBroker-latest
+          path: outputs/model/bitcoinhomebroker_latest.pth
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload artifact (archive)
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-model-BitcoinHomeBroker-archive-${{ github.run_number }}
+          path: outputs/model/bitcoinhomebroker_*.pth
+          if-no-files-found: error
+          retention-days: 90
