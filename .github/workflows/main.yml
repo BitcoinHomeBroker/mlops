@@ -41,7 +41,6 @@ jobs:
           path: outputs/model
         continue-on-error: true
 
-      # Normaliza o arquivo baixado para os nomes esperados pelo script
       - name: Normalize preexisting model before training
         shell: bash
         run: |
@@ -58,9 +57,25 @@ jobs:
             echo "$DL_LIST"
             PREV=$(echo "$DL_LIST" | head -n 1)
             echo "Selecionado para warm-start: $PREV"
-            # Garante compatibilidade com scripts antigos e o alias 'latest'
-            cp -f "$PREV" outputs/model/bitcoinhomebroker_latest.pth
-            cp -f "$PREV" outputs/model/bitcoinhomebroker.pth
+
+            SRC=$(realpath "$PREV")
+            DEST_LATEST=$(realpath -m "outputs/model/bitcoinhomebroker_latest.pth")
+            DEST_COMPAT=$(realpath -m "outputs/model/bitcoinhomebroker.pth")
+
+            # Só copia se o destino for diferente da origem
+            if [ "$SRC" != "$DEST_LATEST" ]; then
+              cp -f "$SRC" "$DEST_LATEST"
+              echo "Atualizado: $DEST_LATEST"
+            else
+              echo "Já é o arquivo 'latest'; nada a copiar para $DEST_LATEST."
+            fi
+
+            if [ "$SRC" != "$DEST_COMPAT" ]; then
+              cp -f "$SRC" "$DEST_COMPAT"
+              echo "Atualizado: $DEST_COMPAT"
+            else
+              echo "Já é o arquivo compatível esperado; nada a copiar para $DEST_COMPAT."
+            fi
           fi
 
           echo "Conteúdo de outputs/model antes do treinamento:"
