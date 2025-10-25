@@ -41,6 +41,9 @@ MODEL_DIR = "outputs/model"
 MODEL_PATH = os.path.join(MODEL_DIR, "bitcoinhomebroker.pth")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+SCALER_PATH = os.path.join(MODEL_DIR, "scaler.json")
+CONFIG_PATH = os.path.join(MODEL_DIR, "config.json")
+
 # === Checkpoint helpers ===
 def _extract_state_dict(chk):
     # aceita tanto dict puro de state_dict quanto dict com metadados
@@ -89,6 +92,51 @@ def save_checkpoint(model, path, hparams=None):
     torch.save(payload, path)
     print(f"[ckpt] Modelo salvo em: {path}")
 
+def save_serving_artifacts(model, model_path, best_params, scaler_obj, lookback, horizon, extra_cfg=None):
+    """
+    Salva:
+      - checkpoint .pth com state_dict + hparams
+      - scaler.json com mean/scale do CLOSE
+      - config.json com lookback/horizon + hparams necessários p/ reconstruir o modelo no serving
+    """
+    # 1) hparams essenciais p/ reconstruir a arquitetura
+    hparams = {
+        "hidden": int(best_params["hidden"]),
+        "layers": int(best_params["layers"]),
+        "dropout": float(best_params["dropout"]),
+        "bidir": bool(best_params["bidir"]),
+        # (lr, batch, epochs não são necessários p/ servir, mas podem ser úteis p/ auditoria)
+        "lr": float(best_params["lr"]),
+        "batch": int(best_params["batch"]),
+        "epochs": int(best_params["epochs"]),
+    }
+
+    # 2) checkpoint consolidado com hparams
+    save_checkpoint(model, model_path, hparams=hparams)
+
+    # 3) scaler do CLOSE (índice 0 do StandardScaler que você usou)
+    scaler_payload = {
+        "mean": float(scaler_obj.mean_[0]),
+        "scale": float(scaler_obj.scale_[0]),
+    }
+    with open(SCALER_PATH, "w") as f:
+        json.dump(scaler_payload, f)
+
+    # 4) config.json para o servidor
+    cfg = {
+        "lookback": int(lookback),
+        "horizon": int(horizon),
+        "input_feature": "close",
+        # opcional: reescrevemos os hparams aqui também
+        **hparams
+    }
+    if extra_cfg:
+        cfg.update(extra_cfg)
+
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f)
+
+    print(f"[serve] Artefatos salvos:\n - {model_path}\n - {SCALER_PATH}\n - {CONFIG_PATH}")
 
 
 # Try Optuna import
@@ -682,6 +730,21 @@ if RUN_PT_TUNING:
         ax.set_title("PyTorch LSTM (tuned) — Test set (USD)")
         ax.legend()
         plt.show()
-        print("Salvando modelo...")
-        torch.save(final_model.state_dict(), "bitcoinhomebroker.pth")
-        print("Modelo salvo.")
+        print("Salvando modelo e artefatos de serving...")
+        
+        # garante o diretório e paths corretos
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        
+        # salva tudo que o servidor precisa: pesos+hparams, scaler e config
+        save_serving_artifacts(
+            model=final_model,
+            model_path=MODEL_PATH,            # => outputs/model/bitcoinhomebroker.pth
+            best_params=best_params_pt,
+            scaler_obj=sc_seq,                # StandardScaler treinado (usa close no índice 0)
+            lookback=LOOKBACK,
+            horizon=HORIZON,
+            extra_cfg=None                    # se quiser, pode passar algo adicional aqui
+        )
+        
+        print("Modelo e artefatos de serving salvos ok.")
+
