@@ -37,6 +37,8 @@ from torch.utils.data import Dataset, DataLoader
 
 import os
 
+import tempfile, shutil
+
 MODEL_DIR = "outputs/model"
 MODEL_PATH = os.path.join(MODEL_DIR, "bitcoinhomebroker.pth")
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -730,21 +732,56 @@ if RUN_PT_TUNING:
         ax.set_title("PyTorch LSTM (tuned) — Test set (USD)")
         ax.legend()
         plt.show()
-        print("Salvando modelo e artefatos de serving...")
         
-        # garante o diretório e paths corretos
+        print("Salvando modelo (bundle) e espelhos JSON...")
+        
         os.makedirs(MODEL_DIR, exist_ok=True)
         
-        # salva tudo que o servidor precisa: pesos+hparams, scaler e config
-        save_serving_artifacts(
-            model=final_model,
-            model_path=MODEL_PATH,            # => outputs/model/bitcoinhomebroker.pth
-            best_params=best_params_pt,
-            scaler_obj=sc_seq,                # StandardScaler treinado (usa close no índice 0)
-            lookback=LOOKBACK,
-            horizon=HORIZON,
-            extra_cfg=None                    # se quiser, pode passar algo adicional aqui
-        )
+        # 1) monta o payload completo para o .pth (bundle único)
+        bundle = {
+            "state_dict": final_model.state_dict(),
+            "hparams": {
+                "hidden": int(best_params_pt["hidden"]),
+                "layers": int(best_params_pt["layers"]),
+                "dropout": float(best_params_pt["dropout"]),
+                "bidir": bool(best_params_pt["bidir"]),
+                # meta úteis (não usados no serving, mas bons p/ auditoria):
+                "lr": float(best_params_pt["lr"]),
+                "batch": int(best_params_pt["batch"]),
+                "epochs": int(best_params_pt["epochs"]),
+            },
+            "scaler": {
+                "mean": float(sc_seq.mean_[0]),
+                "scale": float(sc_seq.scale_[0]),
+            },
+            "config": {
+                "lookback": int(LOOKBACK),
+                "horizon": int(HORIZON),
+                "input_feature": "close"
+            },
+        }
         
-        print("Modelo e artefatos de serving salvos ok.")
+        # 2) escrita atômica do .pth (evita arquivo corrompido se o processo for interrompido)
+        with tempfile.NamedTemporaryFile(dir=MODEL_DIR, delete=False) as tmp:
+            torch.save(bundle, tmp.name)
+        tmp_pth = tmp.name
+        shutil.move(tmp_pth, MODEL_PATH)  # rename atômico na maioria dos FS
+        
+        # 3) JSONs espelho (legíveis para debug/observabilidade)
+        SCALER_PATH = os.path.join(MODEL_DIR, "scaler.json")
+        CONFIG_PATH = os.path.join(MODEL_DIR, "config.json")
+        
+        def _atomic_write_json(path, obj):
+            with tempfile.NamedTemporaryFile("w", dir=os.path.dirname(path), delete=False) as f:
+                json.dump(obj, f)
+                tmpname = f.name
+            shutil.move(tmpname, path)
+        
+        _atomic_write_json(SCALER_PATH, bundle["scaler"])
+        # opcionalmente, incluo os hparams dentro do config para ficar tudo num lugar legível
+        cfg_pretty = {**bundle["config"], **bundle["hparams"]}
+        _atomic_write_json(CONFIG_PATH, cfg_pretty)
+        
+        print("Modelo (.pth bundle) e JSONs salvos em outputs/model/.")
+
 
